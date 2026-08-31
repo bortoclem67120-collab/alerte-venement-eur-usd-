@@ -1,0 +1,128 @@
+import os
+import time
+import requests
+from datetime import datetime, timezone, timedelta
+
+# Configuration Telegram (via variables d'environnement)
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "TON_BOT_TOKEN_ICI")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "TON_CHAT_ID_ICI")
+
+# URL du calendrier public ForexFactory (Format JSON)
+CALENDAR_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+
+# Filtres
+TARGET_CURRENCIES = ["EUR", "USD"]
+TARGET_IMPACTS = ["High", "Medium"]
+ALERT_WINDOW_MINUTES = 15  # Alerte envoyée 15 min avant
+
+# Stockage pour éviter les doublons d'alertes
+notified_events = set()
+
+
+def send_telegram_message(message: str):
+    """Envoie un message formaté sur Telegram."""
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": message,
+        "parse_mode": "Markdown"
+    }
+    try:
+        response = requests.post(url, json=payload, timeout=10)
+        return response.status_code == 200
+    except Exception as e:
+        print(f"[Erreur envoi Telegram] : {e}")
+        return False
+
+
+def generate_trade_guidelines(currency: str, title: str, forecast: str, previous: str) -> str:
+    """Génère le conseil d'exécution et les scénarios de trade."""
+    if currency == "USD":
+        bullish_desc = "Sortie < Prévision / Dégradation macro USD (DXY chute)"
+        bearish_desc = "Sortie > Prévision / Vigueur macro USD (DXY grimpe)"
+    else:  # EUR
+        bullish_desc = "Sortie > Prévision / Vigueur macro Zone Euro"
+        bearish_desc = "Sortie < Prévision / Dégradation macro Zone Euro"
+
+    advice = (
+        f"🧭 *Plan d'Action EUR/USD :*\n"
+        f"• *Scénario Haussier (BUY EUR/USD) :*\n"
+        f"  - Condition : {bullish_desc}\n"
+        f"  - Signal : Breakout M5 / Confirmation pullback sur support\n"
+        f"  - Cible : Résistance supérieure H1\n\n"
+        f"• *Scénario Baissier (SELL EUR/USD) :*\n"
+        f"  - Condition : {bearish_desc}\n"
+        f"  - Signal : Rejet M5 sur résistance / Clôture sous support\n"
+        f"  - Cible : Support inférieur H1\n\n"
+        f"⚠️ *Gestion du risque :* Attendre 1 à 2 min après l'annonce pour éviter les mèches de liquidité et l'élargissement du spread."
+    )
+    return advice
+
+
+def fetch_and_check_events():
+    """Récupère les événements et déclenche les alertes à T-15 min."""
+    headers = {"User-Agent": "Mozilla/5.0 (TradingAlertBot/1.0)"}
+    try:
+        res = requests.get(CALENDAR_URL, headers=headers, timeout=15)
+        if res.status_code != 200:
+            print(f"[Erreur API] Code HTTP : {res.status_code}")
+            return
+
+        events = res.json()
+        now = datetime.now(timezone.utc)
+
+        for event in events:
+            currency = event.get("country")
+            impact = event.get("impact")
+            date_str = event.get("date")  # Format ISO 8601 (ex: 2026-09-01T14:00:00-04:00)
+            title = event.get("title")
+
+            if currency not in TARGET_CURRENCIES or impact not in TARGET_IMPACTS:
+                continue
+
+            event_id = f"{date_str}_{title}_{currency}"
+            if event_id in notified_events:
+                continue
+
+            try:
+                event_time = datetime.fromisoformat(date_str)
+            except Exception:
+                continue
+
+            time_diff = event_time - now
+            minutes_to_event = time_diff.total_seconds() / 60
+
+            # Déclenchement si l'annonce a lieu dans ~15 min (entre 13 et 16 min)
+            if 0 <= minutes_to_event <= ALERT_WINDOW_MINUTES:
+                forecast = event.get("forecast", "N/A")
+                previous = event.get("previous", "N/A")
+                
+                impact_badge = "🔴 Élevé" if impact == "High" else "🟠 Moyen"
+
+                message = (
+                    f"🚨 *ALERTE ÉCONOMIQUE EUR/USD (T-{int(minutes_to_event)} min)* 🚨\n\n"
+                    f"📌 *Événement :* {title}\n"
+                    f"🌍 *Devise :* {currency}\n"
+                    f"⚡ *Impact :* {impact_badge}\n"
+                    f"📊 *Prévision :* {forecast} | *Précédent :* {previous}\n"
+                    f"⏰ *Heure (UTC) :* {event_time.strftime('%H:%M')}\n\n"
+                    f"{generate_trade_guidelines(currency, title, forecast, previous)}"
+                )
+
+                if send_telegram_message(message):
+                    print(f"[Alerte Envoyée] : {title} ({currency})")
+                    notified_events.add(event_id)
+
+    except Exception as e:
+        print(f"[Erreur globale] : {e}")
+
+
+def main():
+    print("Démarrage de la veille économique EUR/USD...")
+    while True:
+        fetch_and_check_events()
+        time.sleep(60)  # Scan chaque minute
+
+
+if __name__ == "__main__":
+    main()
