@@ -1,0 +1,101 @@
+import os
+import requests
+from datetime import datetime, timezone
+
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+
+CALENDAR_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+TARGET_CURRENCIES = ["EUR", "USD"]
+TARGET_IMPACTS = ["High", "Medium"]
+
+# Fenêtre de détection : entre 10 et 20 min (centré sur T-15 min)
+MIN_MINUTES = 10
+MAX_MINUTES = 20
+
+def send_telegram_message(message: str):
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"}
+    try:
+        response = requests.post(url, json=payload, timeout=10)
+        return response.status_code == 200
+    except Exception as e:
+        print(f"[Erreur Telegram] : {e}")
+        return False
+
+def generate_trade_guidelines(currency: str):
+    if currency == "USD":
+        bullish_desc = "Sortie < Prévision / Dégradation macro USD (DXY baisse)"
+        bearish_desc = "Sortie > Prévision / Vigueur macro USD (DXY monte)"
+    else:
+        bullish_desc = "Sortie > Prévision / Vigueur macro Zone Euro"
+        bearish_desc = "Sortie < Prévision / Dégradation macro Zone Euro"
+
+    return (
+        f"🧭 *Plan d'Action EUR/USD :*\n"
+        f"• *Scénario Haussier (BUY EUR/USD) :*\n"
+        f"  - Condition : {bullish_desc}\n"
+        f"  - Signal : Breakout M5 / Confirmation pullback sur support\n"
+        f"  - Cible : Résistance supérieure H1\n\n"
+        f"• *Scénario Baissier (SELL EUR/USD) :*\n"
+        f"  - Condition : {bearish_desc}\n"
+        f"  - Signal : Rejet M5 sur résistance / Clôture sous support\n"
+        f"  - Cible : Support inférieur H1\n\n"
+        f"⚠️ *Gestion du risque :* Attendre 1 à 2 min après l'annonce pour éviter les mèches de spread."
+    )
+
+def main():
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        print("[Erreur] Clés Telegram non configurées.")
+        return
+
+    headers = {"User-Agent": "Mozilla/5.0 (TradingAlertBot/1.0)"}
+    try:
+        res = requests.get(CALENDAR_URL, headers=headers, timeout=15)
+        if res.status_code != 200:
+            print(f"[Erreur API] HTTP {res.status_code}")
+            return
+
+        events = res.json()
+        now = datetime.now(timezone.utc)
+
+        for event in events:
+            currency = event.get("country")
+            impact = event.get("impact")
+            date_str = event.get("date")
+            title = event.get("title")
+
+            if currency not in TARGET_CURRENCIES or impact not in TARGET_IMPACTS:
+                continue
+
+            try:
+                event_time = datetime.fromisoformat(date_str)
+            except Exception:
+                continue
+
+            time_diff = event_time - now
+            minutes_to_event = time_diff.total_seconds() / 60
+
+            if MIN_MINUTES <= minutes_to_event <= MAX_MINUTES:
+                forecast = event.get("forecast", "N/A")
+                previous = event.get("previous", "N/A")
+                impact_badge = "🔴 Élevé" if impact == "High" else "🟠 Moyen"
+
+                message = (
+                    f"🚨 *ALERTE ÉCONOMIQUE EUR/USD (T-{int(minutes_to_event)} min)* 🚨\n\n"
+                    f"📌 *Événement :* {title}\n"
+                    f"🌍 *Devise :* {currency}\n"
+                    f"⚡ *Impact :* {impact_badge}\n"
+                    f"📊 *Prévision :* {forecast} | *Précédent :* {previous}\n"
+                    f"⏰ *Heure (UTC) :* {event_time.strftime('%H:%M')}\n\n"
+                    f"{generate_trade_guidelines(currency)}"
+                )
+
+                if send_telegram_message(message):
+                    print(f"[Alerte Envoyée] : {title}")
+
+    except Exception as e:
+        print(f"[Erreur] : {e}")
+
+if __name__ == "__main__":
+    main()
